@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"periph.io/x/conn/v3/gpio"
@@ -63,6 +65,23 @@ func (c *SetCommand) Execute() error {
 	if p == nil {
 		log.Fatalf("Failed to find %s", pinName)
 	}
+
+	defer p.Halt()
+
+	// make sure the dma channel is released when the program is terminated, otherwise could run out of dma resources
+	var halt = make(chan os.Signal)
+	signal.Notify(halt, syscall.SIGTERM)
+	signal.Notify(halt, syscall.SIGINT)
+
+	go func() {
+		select {
+		case <-halt:
+			if err := p.Halt(); err != nil {
+				log.Println(err)
+			}
+			os.Exit(1)
+		}
+	}()
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
