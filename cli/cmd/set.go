@@ -97,16 +97,17 @@ func (c *SetCommand) Execute() error {
 		}
 	}()
 
+
+	// wait group for all launched goroutines
+	wg := sync.WaitGroup{}
+
 	// channel for notifying the loop that there is a new target in case it is idle
 	// using a buffer of 1 so we can do a non blocking write and be sure that the
 	// control loop will be triggered
 	targetCh := make(chan struct{}, 1)
 
-	// channel for the control loop to notify that it has exited
-	finishedCh := make(chan struct{})
-
 	// run the control loop in a goroutine
-	go c.controlLoop(p, targetCh, finishedCh)
+	go c.controlLoop(p, targetCh, &wg)
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
@@ -129,11 +130,11 @@ func (c *SetCommand) Execute() error {
 		}
 	}
 
-	// notify the control routine that there are no more new targets
+	// notify the control routine when there are no more new targets
 	close(targetCh)
 
-	// wait for the control loop to finish
-	<-finishedCh
+	// wait for the goroutines to finish
+	wg.Wait()
 
 	time.Sleep(1 * time.Second)
 
@@ -153,7 +154,10 @@ func (c *SetCommand) writeSingleValue(p gpio.PinIO, value float64) error {
 	return nil
 }
 
-func (c *SetCommand) moverLoop(p gpio.PinIO, valueCh <-chan float64) error {
+func (c *SetCommand) moverLoop(p gpio.PinIO, valueCh <-chan float64, wg *sync.WaitGroup) error {
+	wg.Add(1)
+	defer wg.Done()
+
 	// move to position values coming in the channel, limiting the rate by sleeping after every move
 	// exits when the channel is closed
 	for value := range valueCh {
@@ -167,8 +171,9 @@ func (c *SetCommand) moverLoop(p gpio.PinIO, valueCh <-chan float64) error {
 	return nil
 }
 
-func (c *SetCommand) controlLoop(p gpio.PinIO, targetCh <-chan struct{}, finishCh chan<- struct{}) {
-	defer close(finishCh)
+func (c *SetCommand) controlLoop(p gpio.PinIO, targetCh <-chan struct{}, wg *sync.WaitGroup) {
+	wg.Add(1)
+	defer wg.Done()
 
 	// last known position
 	var current *float64
@@ -176,7 +181,7 @@ func (c *SetCommand) controlLoop(p gpio.PinIO, targetCh <-chan struct{}, finishC
 	// create the moverLoop goroutine
 	moveCh := make(chan float64)
 	defer close(moveCh)
-	go c.moverLoop(p, moveCh)
+	go c.moverLoop(p, moveCh, wg)
 
 	// will be set to true when the target channel is closed
 	done := false
