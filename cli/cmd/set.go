@@ -26,6 +26,11 @@ type SetCommand struct {
 	moveIntervalDuration time.Duration
 	maxMoveDuration      time.Duration
 	moveStepSize         float64
+	minInputValue        float64
+	maxInputValue        float64
+	minPulseDuration     time.Duration
+	maxPulseDuration     time.Duration
+	dryRun               bool
 
 	target *float64
 
@@ -40,6 +45,11 @@ func NewSetCommand(usagePrefix string) *SetCommand {
 	c.fs.IntVar(&c.num, "num", 0, "PWM number (1-2)")
 	c.fs.DurationVar(&c.moveIntervalDuration, "move-interval-duration", 5*time.Millisecond, "Move interval duration")
 	c.fs.DurationVar(&c.maxMoveDuration, "max-move-duration", 500*time.Millisecond, "Maximum movement duration")
+	c.fs.Float64Var(&c.minInputValue, "min-input-value", 0.0, "Input value for minimum position")
+	c.fs.Float64Var(&c.maxInputValue, "max-input-value", 1.0, "Input value for maximum position")
+	c.fs.DurationVar(&c.minPulseDuration, "min-pulse-duration", 1*time.Millisecond, "Pulse duration for min input value (setting to less than 1ms for servos is dangerous!)")
+	c.fs.DurationVar(&c.maxPulseDuration, "max-pulse-duration", 2*time.Millisecond, "Pulse duration for max input value (setting to more than 2ms for servos is dangerous!)")
+	c.fs.BoolVar(&c.dryRun, "dry-run", false, "Don't actually send the value to the PWM device")
 
 	c.fs.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s %s\n", usagePrefix, c.fs.Name())
@@ -62,6 +72,14 @@ func (c *SetCommand) Init(args []string) error {
 
 	if c.num < 1 || c.num > 2 {
 		return fmt.Errorf("PWM num must be in the range 1-2: %d", c.num)
+	}
+
+	if c.minInputValue >= c.maxInputValue {
+		return fmt.Errorf("min-input-value should be less than max-input-value: %f %f", c.minInputValue, c.maxInputValue)
+	}
+
+	if c.minPulseDuration >= c.maxPulseDuration {
+		return fmt.Errorf("min-pulse-duration should be less than max-pulse-duration: %s %s", c.minPulseDuration, c.maxPulseDuration)
 	}
 
 	c.moveStepSize = float64(c.moveIntervalDuration) / float64(c.maxMoveDuration)
@@ -97,7 +115,6 @@ func (c *SetCommand) Execute() error {
 		}
 	}()
 
-
 	// wait group for all launched goroutines
 	wg := sync.WaitGroup{}
 
@@ -113,12 +130,13 @@ func (c *SetCommand) Execute() error {
 	for scanner.Scan() {
 		str := scanner.Text()
 		value, err := strconv.ParseFloat(str, 64)
-		if err != nil || value < 0.0 || value > 1.0 {
-			log.Printf("pwm duty value must be in the range 0.0-1.0: %s", str)
+		if err != nil || value < c.minInputValue || value > c.maxInputValue {
+			log.Printf("pwm duty value must be in the range %f-%f: %s", c.minInputValue, c.maxInputValue, str)
 			continue
 		}
 
-		c.setTarget(value)
+		valueNormalized := (value - c.minInputValue) / (c.maxInputValue - c.minInputValue)
+		c.setTarget(valueNormalized)
 
 		// non blocking write to the target channel to trigger the control loop if it's idle
 		// but not wait if it's already running
@@ -147,7 +165,15 @@ func (c *SetCommand) Execute() error {
 
 func (c *SetCommand) writeSingleValue(p gpio.PinIO, value float64) error {
 	// the range is 1ms to 2ms out of 20ms (in 50Hz), so between 5% and 10%
-	duty := gpio.Duty((value/20 + 0.05) * float64(gpio.DutyMax))
+	period := 20 * time.Millisecond // (at 50Hz)
+	minPulseDuty := float64(c.minPulseDuration) / float64(period)
+	maxPulseDuty := float64(c.maxPulseDuration) / float64(period)
+	duty := gpio.Duty((minPulseDuty + value*(maxPulseDuty-minPulseDuty)) * float64(gpio.DutyMax))
+	if c.dryRun {
+		fmt.Printf("dry-run: would write %s to PWM device\n", duty)
+		return nil
+	}
+
 	if err := p.PWM(duty, 50*physic.Hertz); err != nil {
 		return err
 	}
