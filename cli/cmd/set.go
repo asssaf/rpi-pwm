@@ -28,6 +28,9 @@ type SetCommand struct {
 	moveStepSize         float64
 	minInputValue        float64
 	maxInputValue        float64
+	minPulseDuration     time.Duration
+	maxPulseDuration     time.Duration
+	dryRun               bool
 
 	target *float64
 
@@ -44,6 +47,9 @@ func NewSetCommand(usagePrefix string) *SetCommand {
 	c.fs.DurationVar(&c.maxMoveDuration, "max-move-duration", 500*time.Millisecond, "Maximum movement duration")
 	c.fs.Float64Var(&c.minInputValue, "min-input-value", 0.0, "Input value for minimum position")
 	c.fs.Float64Var(&c.maxInputValue, "max-input-value", 1.0, "Input value for maximum position")
+	c.fs.DurationVar(&c.minPulseDuration, "min-pulse-duration", 1*time.Millisecond, "Pulse duration for min input value (setting to less than 1ms for servos is dangerous!)")
+	c.fs.DurationVar(&c.maxPulseDuration, "max-pulse-duration", 2*time.Millisecond, "Pulse duration for max input value (setting to more than 2ms for servos is dangerous!)")
+	c.fs.BoolVar(&c.dryRun, "dry-run", false, "Don't actually send the value to the PWM device")
 
 	c.fs.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s %s\n", usagePrefix, c.fs.Name())
@@ -70,6 +76,10 @@ func (c *SetCommand) Init(args []string) error {
 
 	if c.minInputValue >= c.maxInputValue {
 		return fmt.Errorf("min-input-value should be less than max-input-value: %f %f", c.minInputValue, c.maxInputValue)
+	}
+
+	if c.minPulseDuration >= c.maxPulseDuration {
+		return fmt.Errorf("min-pulse-duration should be less than max-pulse-duration: %s %s", c.minPulseDuration, c.maxPulseDuration)
 	}
 
 	c.moveStepSize = float64(c.moveIntervalDuration) / float64(c.maxMoveDuration)
@@ -155,7 +165,15 @@ func (c *SetCommand) Execute() error {
 
 func (c *SetCommand) writeSingleValue(p gpio.PinIO, value float64) error {
 	// the range is 1ms to 2ms out of 20ms (in 50Hz), so between 5% and 10%
-	duty := gpio.Duty((value/20 + 0.05) * float64(gpio.DutyMax))
+	period := 20 * time.Millisecond // (at 50Hz)
+	minPulseDuty := float64(c.minPulseDuration) / float64(period)
+	maxPulseDuty := float64(c.maxPulseDuration) / float64(period)
+	duty := gpio.Duty((minPulseDuty + value*(maxPulseDuty-minPulseDuty)) * float64(gpio.DutyMax))
+	if c.dryRun {
+		fmt.Printf("dry-run: would write %s to PWM device\n", duty)
+		return nil
+	}
+
 	if err := p.PWM(duty, 50*physic.Hertz); err != nil {
 		return err
 	}
