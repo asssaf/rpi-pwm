@@ -26,6 +26,8 @@ type SetCommand struct {
 	moveIntervalDuration time.Duration
 	maxMoveDuration      time.Duration
 	moveStepSize         float64
+	minInputValue        float64
+	maxInputValue        float64
 
 	target *float64
 
@@ -40,6 +42,8 @@ func NewSetCommand(usagePrefix string) *SetCommand {
 	c.fs.IntVar(&c.num, "num", 0, "PWM number (1-2)")
 	c.fs.DurationVar(&c.moveIntervalDuration, "move-interval-duration", 5*time.Millisecond, "Move interval duration")
 	c.fs.DurationVar(&c.maxMoveDuration, "max-move-duration", 500*time.Millisecond, "Maximum movement duration")
+	c.fs.Float64Var(&c.minInputValue, "min-input-value", 0.0, "Input value for minimum position")
+	c.fs.Float64Var(&c.maxInputValue, "max-input-value", 1.0, "Input value for maximum position")
 
 	c.fs.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s %s\n", usagePrefix, c.fs.Name())
@@ -62,6 +66,10 @@ func (c *SetCommand) Init(args []string) error {
 
 	if c.num < 1 || c.num > 2 {
 		return fmt.Errorf("PWM num must be in the range 1-2: %d", c.num)
+	}
+
+	if c.minInputValue >= c.maxInputValue {
+		return fmt.Errorf("min-input-value should be less than max-input-value: %f %f", c.minInputValue, c.maxInputValue)
 	}
 
 	c.moveStepSize = float64(c.moveIntervalDuration) / float64(c.maxMoveDuration)
@@ -97,7 +105,6 @@ func (c *SetCommand) Execute() error {
 		}
 	}()
 
-
 	// wait group for all launched goroutines
 	wg := sync.WaitGroup{}
 
@@ -113,12 +120,13 @@ func (c *SetCommand) Execute() error {
 	for scanner.Scan() {
 		str := scanner.Text()
 		value, err := strconv.ParseFloat(str, 64)
-		if err != nil || value < 0.0 || value > 1.0 {
-			log.Printf("pwm duty value must be in the range 0.0-1.0: %s", str)
+		if err != nil || value < c.minInputValue || value > c.maxInputValue {
+			log.Printf("pwm duty value must be in the range %f-%f: %s", c.minInputValue, c.maxInputValue, str)
 			continue
 		}
 
-		c.setTarget(value)
+		valueNormalized := (value - c.minInputValue) / (c.maxInputValue - c.minInputValue)
+		c.setTarget(valueNormalized)
 
 		// non blocking write to the target channel to trigger the control loop if it's idle
 		// but not wait if it's already running
